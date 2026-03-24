@@ -1,0 +1,43 @@
+{
+  "name": "@genosis/sdk",
+  "version": "1.0.0",
+  "description": "Genosis LLM cost optimization SDK for TypeScript/Node.js",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepare": "tsup",
+    "test": "vitest run",
+    "dev": "tsup --watch"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "files": ["dist", "LICENSE", "NOTICE", "README.md"],
+  "license": "Apache-2.0",
+  "author": "Genosis Limited <hello@usegenosis.ai>",
+  "homepage": "https://usegenosis.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Genosis-Limited/genosis-js"
+  },
+  "keywords": ["genosis", "llm", "cache", "optimization", "ai", "anthropic", "openai", "gemini"]
+}
