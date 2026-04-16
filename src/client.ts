@@ -443,8 +443,8 @@ export class Genosis {
     } else {
       // OpenAI/Google wire format: system in messages array, tools after system.
       let pos = 0;
-      const systemMsg = (params.messages ?? []).find((m: any) => m.role === 'system');
-      if (systemMsg) {
+      const systemMsgs = (params.messages ?? []).filter((m: any) => m.role === 'system');
+      for (const systemMsg of systemMsgs) {
         const content = systemMsg.content;
         if (typeof content === 'string') {
           blocks.push({ hash: sha256(content), tokens: Math.ceil(content.length / 4), position: pos++, cached: false, source: 'system' });

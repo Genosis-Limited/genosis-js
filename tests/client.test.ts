@@ -672,6 +672,90 @@ describe('Manifest behavior', () => {
     // String content: unchanged (nothing to reorder)
     expect(calledParams.messages[0].content).toBe(systemText);
   });
+
+  it('OpenAI/Google: extracts blocks from ALL system messages, not just the first', async () => {
+    const { client, bufferEvents } = makeClient();
+    const systemInstructions = 'You are a customer support agent for TechCorp.';
+    const ragContent = 'Retrieved Context: Billing policies and procedures for TechCorp customers.';
+
+    const fn = vi.fn(async () => ({ usage: { prompt_tokens: 100, completion_tokens: 10 } }));
+    await client.call({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: systemInstructions },
+        { role: 'system', content: ragContent },
+        { role: 'user', content: 'What is your refund policy?' },
+      ],
+    }, fn);
+
+    // Find the telemetry event
+    const telemetryEvent = bufferEvents.find(e => e.type === 'telemetry');
+    expect(telemetryEvent).toBeDefined();
+    const blocks = telemetryEvent!.payload.blocks;
+
+    // Should have 2 system blocks — one for instructions, one for RAG
+    const systemBlocks = blocks.filter((b: any) => b.source === 'system');
+    expect(systemBlocks.length).toBe(2);
+    expect(systemBlocks[0].hash).toBe(sha256(systemInstructions));
+    expect(systemBlocks[1].hash).toBe(sha256(ragContent));
+    expect(systemBlocks[0].position).toBe(0);
+    expect(systemBlocks[1].position).toBe(1);
+  });
+
+  it('OpenAI/Google: multiple system messages each produce independent blocks for optimization', async () => {
+    const { client, bufferEvents } = makeClient();
+    const block1 = 'System instructions that appear on every request.';
+    const block2 = 'RAG context about billing that varies per request.';
+    const block3 = 'Additional context about technical troubleshooting.';
+
+    const fn = vi.fn(async () => ({ usage: { prompt_tokens: 100, completion_tokens: 10 } }));
+    await client.call({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: block1 },
+        { role: 'system', content: block2 },
+        { role: 'system', content: block3 },
+        { role: 'user', content: 'Help me' },
+      ],
+    }, fn);
+
+    const telemetryEvent = bufferEvents.find(e => e.type === 'telemetry');
+    const blocks = telemetryEvent!.payload.blocks;
+    const systemBlocks = blocks.filter((b: any) => b.source === 'system');
+
+    expect(systemBlocks.length).toBe(3);
+    expect(systemBlocks[0].hash).toBe(sha256(block1));
+    expect(systemBlocks[1].hash).toBe(sha256(block2));
+    expect(systemBlocks[2].hash).toBe(sha256(block3));
+    // Positions should be sequential
+    expect(systemBlocks[0].position).toBe(0);
+    expect(systemBlocks[1].position).toBe(1);
+    expect(systemBlocks[2].position).toBe(2);
+  });
+
+  it('Google: multiple system messages extracted identically to OpenAI format', async () => {
+    const { client, bufferEvents } = makeClient();
+    const systemInstructions = 'You are a customer support agent.';
+    const ragContent = 'Retrieved billing context for the customer.';
+
+    const fn = vi.fn(async () => ({ usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10 } }));
+    await client.call({
+      model: 'gemini-2.5-pro',
+      messages: [
+        { role: 'system', content: systemInstructions },
+        { role: 'system', content: ragContent },
+        { role: 'user', content: 'What is your refund policy?' },
+      ],
+    }, fn);
+
+    const telemetryEvent = bufferEvents.find(e => e.type === 'telemetry');
+    const blocks = telemetryEvent!.payload.blocks;
+    const systemBlocks = blocks.filter((b: any) => b.source === 'system');
+
+    expect(systemBlocks.length).toBe(2);
+    expect(systemBlocks[0].hash).toBe(sha256(systemInstructions));
+    expect(systemBlocks[1].hash).toBe(sha256(ragContent));
+  });
 });
 
 // ── Memoization ──────────────────────────────────────────────────────────────
