@@ -932,42 +932,53 @@ describe('Telemetry', () => {
 
   it('includes blocks and fingerprint', async () => {
     const systemText = 'You are an assistant.';
+    const userText = 'hi';
     const { client, bufferEvents } = makeClient();
 
     const fn = vi.fn(async () => ({ usage: { input_tokens: 10, output_tokens: 5 } }));
     await client.call({
       model: 'claude-sonnet-4-6',
       system: systemText,
-      messages: [{ role: 'user', content: 'hi' }],
+      messages: [{ role: 'user', content: userText }],
     }, fn);
 
     const ev = bufferEvents.find(e => e.type === 'telemetry');
     expect(ev).toBeDefined();
-    expect(ev!.payload.blocks.length).toBe(1);
+    // v1.1: system + user blocks (user message now tracked as a block).
+    expect(ev!.payload.blocks.length).toBe(2);
     expect(ev!.payload.blocks[0].hash).toBe(sha256(systemText));
+    expect(ev!.payload.blocks[0].source).toBe('system');
+    expect(ev!.payload.blocks[1].hash).toBe(sha256(userText));
+    expect(ev!.payload.blocks[1].source).toBe('user');
     expect(ev!.payload.fingerprint).toBeDefined();
   });
 
   it('extracts blocks from OpenAI messages[role=system] string', async () => {
     const systemText = 'You are a helpful assistant.';
+    const userText = 'Hello';
     const { client, bufferEvents } = makeClient();
 
     const fn = vi.fn(async () => ({ usage: { prompt_tokens: 20, completion_tokens: 10 } }));
     await client.call({
       model: 'gpt-4o',
-      messages: [{ role: 'system', content: systemText }, { role: 'user', content: 'Hello' }],
+      messages: [{ role: 'system', content: systemText }, { role: 'user', content: userText }],
     }, fn);
 
     const ev = bufferEvents.find(e => e.type === 'telemetry');
     expect(ev).toBeDefined();
-    expect(ev!.payload.blocks.length).toBe(1);
+    // v1.1: system + user.
+    expect(ev!.payload.blocks.length).toBe(2);
     expect(ev!.payload.blocks[0].hash).toBe(sha256(systemText));
+    expect(ev!.payload.blocks[0].source).toBe('system');
     expect(ev!.payload.blocks[0].cached).toBe(false);
+    expect(ev!.payload.blocks[1].hash).toBe(sha256(userText));
+    expect(ev!.payload.blocks[1].source).toBe('user');
   });
 
   it('extracts multiple blocks from OpenAI messages[role=system] array', async () => {
     const segA = 'You are a code assistant.';
     const segB = 'You specialize in TypeScript.';
+    const userText = 'Hello';
     const { client, bufferEvents } = makeClient();
 
     const fn = vi.fn(async () => ({ usage: { prompt_tokens: 30, completion_tokens: 10 } }));
@@ -978,17 +989,23 @@ describe('Telemetry', () => {
           { type: 'text', text: segA },
           { type: 'text', text: segB },
         ] },
-        { role: 'user', content: 'Hello' },
+        { role: 'user', content: userText },
       ],
     }, fn);
 
     const ev = bufferEvents.find(e => e.type === 'telemetry');
     expect(ev).toBeDefined();
-    expect(ev!.payload.blocks.length).toBe(2);
+    // v1.1: two system segments + user block.
+    expect(ev!.payload.blocks.length).toBe(3);
     expect(ev!.payload.blocks[0].hash).toBe(sha256(segA));
+    expect(ev!.payload.blocks[0].source).toBe('system');
     expect(ev!.payload.blocks[1].hash).toBe(sha256(segB));
+    expect(ev!.payload.blocks[1].source).toBe('system');
+    expect(ev!.payload.blocks[2].hash).toBe(sha256(userText));
+    expect(ev!.payload.blocks[2].source).toBe('user');
     expect(ev!.payload.blocks[0].cached).toBe(false);
     expect(ev!.payload.blocks[1].cached).toBe(false);
+    expect(ev!.payload.blocks[2].cached).toBe(false);
   });
 
   it('includes manifest_version and manifest_token', async () => {
@@ -1027,6 +1044,281 @@ describe('Telemetry', () => {
 
     const ev = bufferEvents.find(e => e.type === 'telemetry');
     expect(ev!.payload.worker_id).toBe(client.workerId);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v1.1.0 — user + history block extraction
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('User + history block extraction (v1.1)', () => {
+  it('single user message produces one user block and no history', async () => {
+    const userText = 'What is the weather?';
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 5, output_tokens: 3 } }));
+
+    await client.call({
+      model: 'claude-sonnet-4-6',
+      system: 'be helpful',
+      messages: [{ role: 'user', content: userText }],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    const userBlocks = ev!.payload.blocks.filter((b: any) => b.source === 'user');
+    const historyBlocks = ev!.payload.blocks.filter((b: any) => b.source === 'history');
+    expect(userBlocks).toHaveLength(1);
+    expect(userBlocks[0].hash).toBe(sha256(userText));
+    expect(historyBlocks).toHaveLength(0);
+  });
+
+  it('multi-turn conversation produces user (current) + history (prior) blocks', async () => {
+    const q1 = 'first question';
+    const a1 = 'first answer';
+    const q2 = 'follow-up question';  // this is the current user message
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 20, output_tokens: 10 } }));
+
+    await client.call({
+      model: 'claude-sonnet-4-6',
+      system: 'be helpful',
+      messages: [
+        { role: 'user', content: q1 },
+        { role: 'assistant', content: a1 },
+        { role: 'user', content: q2 },
+      ],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    const userBlocks = ev!.payload.blocks.filter((b: any) => b.source === 'user');
+    const historyBlocks = ev!.payload.blocks.filter((b: any) => b.source === 'history');
+
+    // Exactly one user block — the LAST role:'user' message.
+    expect(userBlocks).toHaveLength(1);
+    expect(userBlocks[0].hash).toBe(sha256(q2));
+
+    // Two history blocks — the earlier user turn and the assistant reply.
+    expect(historyBlocks).toHaveLength(2);
+    expect(historyBlocks[0].hash).toBe(sha256(q1));
+    expect(historyBlocks[1].hash).toBe(sha256(a1));
+  });
+
+  it('system in messages (OpenAI format) is NOT counted as history', async () => {
+    const system = 'be helpful';
+    const userText = 'hi';
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+
+    await client.call({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userText },
+      ],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    expect(ev!.payload.blocks.filter((b: any) => b.source === 'system')).toHaveLength(1);
+    expect(ev!.payload.blocks.filter((b: any) => b.source === 'user')).toHaveLength(1);
+    expect(ev!.payload.blocks.filter((b: any) => b.source === 'history')).toHaveLength(0);
+  });
+
+  it('tool-role messages count as history', async () => {
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 15, output_tokens: 5 } }));
+
+    await client.call({
+      model: 'claude-sonnet-4-6',
+      system: 'be helpful',
+      messages: [
+        { role: 'user', content: 'use a tool' },
+        { role: 'assistant', content: 'calling tool...' },
+        { role: 'tool', content: 'tool_result' },
+        { role: 'user', content: 'what next?' },
+      ],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    const history = ev!.payload.blocks.filter((b: any) => b.source === 'history');
+    // 1 prior user + 1 assistant + 1 tool = 3 history blocks
+    expect(history).toHaveLength(3);
+  });
+
+  it('multipart user content produces one user block per text part', async () => {
+    const segA = 'first text part';
+    const segB = 'second text part';
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { prompt_tokens: 12, completion_tokens: 5 } }));
+
+    await client.call({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: 'be helpful' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: segA },
+            { type: 'text', text: segB },
+          ],
+        },
+      ],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    const userBlocks = ev!.payload.blocks.filter((b: any) => b.source === 'user');
+    expect(userBlocks).toHaveLength(2);
+    expect(userBlocks[0].hash).toBe(sha256(segA));
+    expect(userBlocks[1].hash).toBe(sha256(segB));
+  });
+
+  it('non-text content items (images, audio) are skipped', async () => {
+    const text = 'describe this image';
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { prompt_tokens: 100, completion_tokens: 10 } }));
+
+    await client.call({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: 'helpful' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,XYZ' } },
+          ],
+        },
+      ],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    const userBlocks = ev!.payload.blocks.filter((b: any) => b.source === 'user');
+    expect(userBlocks).toHaveLength(1);
+    expect(userBlocks[0].hash).toBe(sha256(text));
+  });
+
+  it('empty messages array produces no user or history blocks', async () => {
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 1, output_tokens: 1 } }));
+
+    await client.call({
+      model: 'claude-sonnet-4-6',
+      system: 'standalone',
+      messages: [],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    expect(ev!.payload.blocks.filter((b: any) => b.source === 'user')).toHaveLength(0);
+    expect(ev!.payload.blocks.filter((b: any) => b.source === 'history')).toHaveLength(0);
+    expect(ev!.payload.blocks.filter((b: any) => b.source === 'system')).toHaveLength(1);
+  });
+
+  it('user + history blocks are never cached', async () => {
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 10, output_tokens: 5 } }));
+
+    await client.call({
+      model: 'claude-sonnet-4-6',
+      system: 'helpful',
+      messages: [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'reply' },
+        { role: 'user', content: 'second' },
+      ],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    const userHistory = ev!.payload.blocks.filter((b: any) => b.source === 'user' || b.source === 'history');
+    expect(userHistory.length).toBeGreaterThan(0);
+    for (const b of userHistory) {
+      expect(b.cached).toBe(false);
+    }
+  });
+
+  it('position numbering is monotonic and user/history come AFTER system+tools', async () => {
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 30, output_tokens: 10 } }));
+
+    await client.call({
+      model: 'claude-sonnet-4-6',
+      system: 'sys',
+      tools: [{ name: 'calc', description: 'calculator', input_schema: { type: 'object' } }],
+      messages: [
+        { role: 'user', content: 'history user' },
+        { role: 'assistant', content: 'history asst' },
+        { role: 'user', content: 'current user' },
+      ],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    const blocks = ev!.payload.blocks;
+
+    // Anthropic order: tool (0), system (1), then history/user (2..)
+    expect(blocks[0].source).toBe('tool');
+    expect(blocks[0].position).toBe(0);
+    expect(blocks[1].source).toBe('system');
+    expect(blocks[1].position).toBe(1);
+    expect(blocks[2].source).toBe('history');
+    expect(blocks[3].source).toBe('history');
+    expect(blocks[4].source).toBe('user');
+    // Positions monotonically increase
+    for (let i = 1; i < blocks.length; i++) {
+      expect(blocks[i].position).toBeGreaterThan(blocks[i - 1].position);
+    }
+  });
+
+  it('single-turn fingerprint matches the v1.0 formula (backward compat)', async () => {
+    // v1.0 fingerprint = sha256( joined block hashes (system+tool) + '+' + sha256(userMessage) ).
+    // v1.1 fingerprint = sha256( joined block hashes (system+tool+user) ).
+    // For a single-turn request the user message is appended as one block
+    // with hash = sha256(userText), so the concatenated strings are
+    // byte-identical between the two formulas.
+    const system = 'helpful';
+    const userText = 'hello world';
+    const { client, bufferEvents } = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 5, output_tokens: 3 } }));
+
+    await client.call({
+      model: 'claude-sonnet-4-6',
+      system,
+      messages: [{ role: 'user', content: userText }],
+    }, fn);
+
+    const ev = bufferEvents.find(e => e.type === 'telemetry');
+    // Reproduce v1.0's formula manually
+    const v10Combined = sha256(system) + '+' + sha256(userText);
+    const v10Fingerprint = sha256(v10Combined);
+    expect(ev!.payload.fingerprint).toBe(v10Fingerprint);
+  });
+
+  it('multi-turn requests with same final user but different history differ in fingerprint', async () => {
+    const system = 'helpful';
+    const final = 'follow-up';
+    const makeClient1 = makeClient();
+    const makeClient2 = makeClient();
+    const fn = vi.fn(async () => ({ usage: { input_tokens: 5, output_tokens: 3 } }));
+
+    await makeClient1.client.call({
+      model: 'claude-sonnet-4-6',
+      system,
+      messages: [
+        { role: 'user', content: 'history A' },
+        { role: 'assistant', content: 'reply A' },
+        { role: 'user', content: final },
+      ],
+    }, fn);
+
+    await makeClient2.client.call({
+      model: 'claude-sonnet-4-6',
+      system,
+      messages: [
+        { role: 'user', content: 'history B' },
+        { role: 'assistant', content: 'reply B' },
+        { role: 'user', content: final },
+      ],
+    }, fn);
+
+    const ev1 = makeClient1.bufferEvents.find(e => e.type === 'telemetry');
+    const ev2 = makeClient2.bufferEvents.find(e => e.type === 'telemetry');
+    expect(ev1!.payload.fingerprint).not.toBe(ev2!.payload.fingerprint);
   });
 });
 

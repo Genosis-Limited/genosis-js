@@ -794,7 +794,7 @@ describe('reporting edge cases', () => {
     expect(secondTelemetry[0].payload.usage).toEqual({ input_tokens: 0, output_tokens: 0, cache_write_tokens: 0, cache_read_tokens: 0 });
   });
 
-  it('telemetry has no blocks when no system prompt provided', async () => {
+  it('telemetry has only the user block when no system prompt provided', async () => {
     const { client, bufferEvents } = makeClient();
     setManifest(client, 'openai', 'gpt-4o', { cache_train: [] });
 
@@ -806,8 +806,11 @@ describe('reporting edge cases', () => {
     await client.call({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] }, fn);
 
     const event = bufferEvents.find(e => e.type === 'telemetry')?.payload;
-    expect(event!.blocks).toEqual([]); // no blocks extracted
-    expect(event!.fingerprint).toBeNull(); // no fingerprint without blocks
+    // v1.1: user message is now a block, so we get one telemetry block
+    // (the user) even when no system or tools are present.
+    expect(event!.blocks).toHaveLength(1);
+    expect(event!.blocks[0].source).toBe('user');
+    expect(event!.fingerprint).not.toBeNull();
   });
 
   it('queueTelemetry handles null response gracefully', async () => {

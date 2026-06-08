@@ -8,7 +8,21 @@ export interface TelemetryBlock {
   tokens: number;
   position: number;
   cached: boolean;
-  source?: 'system' | 'tool';
+  /**
+   * What part of the prompt this block came from.
+   *
+   *   'system'  — system instructions (from params.system, or system-role
+   *               messages in OpenAI/Google format).
+   *   'tool'    — tool / function definitions (params.tools).
+   *   'user'    — the current user message (the LAST role:'user' entry
+   *               in messages). Exactly one per call when there's at
+   *               least one user message.
+   *   'history' — every other message in messages (prior user turns,
+   *               all assistant turns, tool-role messages). Tracked so
+   *               dashboards can attribute cost to conversation history
+   *               vs the current input.
+   */
+  source?: 'system' | 'tool' | 'user' | 'history';
 }
 
 export interface CacheManifest {

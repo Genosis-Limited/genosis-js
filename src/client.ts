@@ -265,8 +265,7 @@ export class Genosis {
 
         if (this.memoStorage && !memoSuspended) {
           const blocks = this.extractBlocks(o, provider);
-          const userMsg = this.extractUserMessage(o);
-          const fingerprint = this.computeFingerprint(blocks, userMsg);
+          const fingerprint = this.computeFingerprint(blocks);
 
           if (fingerprint) {
             const candidate = this.findMemoCandidate(provider, model, fingerprint);
@@ -396,11 +395,14 @@ export class Genosis {
     const blocks: TelemetryBlock[] = [];
     const system = params.system;
     const tools = params.tools;
+    // Shared monotonic position counter across all phases. Order:
+    //   Anthropic format    → tools, system, history, user
+    //   OpenAI/Google format → system, tools, history, user
+    let pos = 0;
 
     if (system !== undefined) {
       // Anthropic wire format. Context window order: tools → system → messages.
       // Tool blocks get LOWER positions so fingerprint and optimization reflect correct prefix order.
-      let pos = 0;
 
       // 1. Tool definitions first (lower positions)
       if (Array.isArray(tools)) {
@@ -423,7 +425,7 @@ export class Genosis {
 
       // 2. System blocks after tools
       if (typeof system === 'string') {
-        blocks.push({ hash: sha256(system), tokens: Math.ceil(system.length / 4), position: pos, cached: false, source: 'system' });
+        blocks.push({ hash: sha256(system), tokens: Math.ceil(system.length / 4), position: pos++, cached: false, source: 'system' });
       } else if (Array.isArray(system)) {
         const sysBlocks: TelemetryBlock[] = [];
         for (let i = 0; i < system.length; i++) {
@@ -442,7 +444,6 @@ export class Genosis {
       }
     } else {
       // OpenAI/Google wire format: system in messages array, tools after system.
-      let pos = 0;
       const systemMsgs = (params.messages ?? []).filter((m: any) => m.role === 'system');
       for (const systemMsg of systemMsgs) {
         const content = systemMsg.content;
@@ -468,21 +469,62 @@ export class Genosis {
       }
     }
 
+    // 3. User + history. Walk messages in order.
+    //    The LAST role:'user' entry is the current input (source: 'user').
+    //    Everything else (prior user, all assistant, all tool) is history.
+    //    System messages are skipped (already extracted above in the
+    //    OpenAI/Google branch, or not present in messages in the Anthropic
+    //    branch).
+    //
+    //    Telemetry purpose: lets dashboards attribute spend to the current
+    //    user input vs the cost of carrying history. We do NOT apply
+    //    cache_control to these blocks — providers don't cache user content
+    //    by default — so `cached: false` always.
+    const messages = (params.messages ?? []) as Array<{ role?: string; content?: any }>;
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role === 'user') { lastUserIdx = i; break; }
+    }
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      const role = msg?.role;
+      if (role === 'system') continue;  // already extracted above or N/A
+      const source: 'user' | 'history' = (i === lastUserIdx) ? 'user' : 'history';
+      const content = msg?.content;
+      if (typeof content === 'string') {
+        if (content) {
+          blocks.push({ hash: sha256(content), tokens: Math.ceil(content.length / 4), position: pos++, cached: false, source });
+        }
+      } else if (Array.isArray(content)) {
+        // Multipart content (e.g., multimodal text + image). Each text part
+        // becomes one block; non-text items (images, audio) are skipped —
+        // we don't have token counts for them anyway.
+        for (const item of content) {
+          const text = typeof item === 'string' ? item : (item?.text ?? '');
+          if (text) {
+            blocks.push({ hash: sha256(text), tokens: Math.ceil(text.length / 4), position: pos++, cached: false, source });
+          }
+        }
+      }
+      // If content is undefined / null / some other shape (tool_calls without
+      // text, etc.), there's nothing meaningful to hash and we skip silently.
+    }
+
     return blocks;
   }
 
-  private extractUserMessage(params: Record<string, any>): string {
-    const messages = params.messages ?? [];
-    const userMsgs = messages.filter((m: any) => m.role === 'user');
-    return userMsgs.map((m: any) => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n');
-  }
-
-  private computeFingerprint(blocks: TelemetryBlock[], userMessage: string = ''): string | null {
+  private computeFingerprint(blocks: TelemetryBlock[]): string | null {
     if (blocks.length === 0) return null;
+    // Hash all blocks ordered by position. As of v1.1.0, this includes
+    // user + history blocks — so the fingerprint properly differentiates
+    // multi-turn conversations that have the same final user message but
+    // different conversation history. Pre-1.1.0 callers should observe
+    // the SAME fingerprint for single-turn requests (the user content
+    // ends up in the array with the same hash that was previously
+    // appended separately).
     const ordered = [...blocks].sort((a, b) => a.position - b.position);
-    let combined = ordered.map(b => b.hash).join('+');
-    if (userMessage) combined += '+' + sha256(userMessage);
-    return sha256(combined);
+    return sha256(ordered.map(b => b.hash).join('+'));
   }
 
   private extractUsage(response: any, provider: string): { input: number; output: number; cacheWrite: number; cacheRead: number } {
@@ -663,8 +705,7 @@ export class Genosis {
       }
       const model = Genosis.normalizeModel(String(optimized.model ?? ''));
       const blocks = this.extractBlocks(optimized, provider);
-      const userMsg = this.extractUserMessage(optimized);
-      const fingerprint = this.computeFingerprint(blocks, userMsg);
+      const fingerprint = this.computeFingerprint(blocks);
       const usage = this.extractUsage(response, provider);
       const manifest = this.manifestData.get(`${provider}/${model}`) ?? {};
 
